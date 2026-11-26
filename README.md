@@ -77,7 +77,7 @@ Three independent layers, so no single bug is fatal:
 1. **SQL guard** (`src/sql-guard.ts`). Comments, string literals and quoted identifiers are stripped per dialect (MySQL `#` and `--␠` comments, PostgreSQL dollar-quoting and nested comments, SQLite `[brackets]`…), then the statement must be a *single* statement of an allowed kind. Rejected outright: multiple statements, `COPY`, `CALL`, `SET`, `ATTACH`, `SELECT … INTO OUTFILE`, `LOAD_FILE()`, `pg_read_file()`, `load_extension()`, SQLite `PRAGMA` assignment, MySQL `/*! … */` executable comments, and more. `UPDATE` / `DELETE` without `WHERE` is refused in read-write mode.
 2. **Engine-level read-only.**
    - PostgreSQL: `BEGIN READ ONLY` + `SET LOCAL statement_timeout`, results streamed through a cursor.
-   - MySQL: `SET SESSION TRANSACTION READ ONLY` + `START TRANSACTION READ ONLY` + `MAX_EXECUTION_TIME`. (The session-level setting matters: MySQL DDL commits implicitly and would otherwise escape a plain read-only transaction. This is covered by a test.)
+   - MySQL: `SET SESSION TRANSACTION READ ONLY` + `START TRANSACTION READ ONLY` + `MAX_EXECUTION_TIME`, results streamed and cut off after the row cap. (The session-level setting matters: MySQL DDL commits implicitly and would otherwise escape a plain read-only transaction. This is covered by a test.)
    - SQLite: the file is opened `readOnly` and `PRAGMA query_only = ON`. Queries run in a separate process with its own read-only connection, which is killed when the statement timeout passes.
 3. **Your database account.** The guard and read-only mode are defences, not a substitute for least privilege. Connect with a role that can only read what the model should see.
 
@@ -101,7 +101,7 @@ GRANT SELECT ON mydb.* TO 'mcp_readonly'@'%';
 ## Known limits
 
 - **SQLite timeouts stop the query process.** `node:sqlite` cannot interrupt a statement, so `query` and `sample_rows` run in a child process that is killed (SIGKILL) at `--timeout-ms` and restarted for the next query. The schema tools and `execute` run in the server process without a timeout; they are short metadata reads or single writes. An in-memory database (`:memory:`) only exists inside the server process, so its queries have no timeout.
-- **MySQL buffers a result set before the row cap is applied** (`mysql2` has no server-side cursor). Keep a `LIMIT` in large queries. `MAX_EXECUTION_TIME` bounds time.
+- **MySQL has no server-side cursor in `mysql2`.** `query` streams rows and stops after the row cap. The connection is then closed so the server stops the query, and the pool opens a new one. The server may still scan or sort many rows before it sends the first one, so keep a `LIMIT` in large queries. `MAX_EXECUTION_TIME` bounds time.
 - Only the first statement type is classified; the engine-level read-only layer is what ultimately prevents writes through exotic constructs.
 - `EXPLAIN ANALYZE` actually executes the statement. It is classified by the statement it wraps, and in read-only mode a wrapped write is rejected.
 

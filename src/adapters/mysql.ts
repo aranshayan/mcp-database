@@ -1,3 +1,4 @@
+import type { Connection as CallbackConnection } from "mysql2";
 import mysql from "mysql2/promise";
 import type { Adapter, ExecuteResult, Limits, Param, QueryResult, TableDescription, TableSummary } from "../types.js";
 import { toJsonRow } from "../serialize.js";
@@ -16,8 +17,9 @@ type Conn = mysql.PoolConnection;
  *
  * Queries run in `START TRANSACTION READ ONLY` with a per-session execution limit
  * (`MAX_EXECUTION_TIME` on MySQL, `max_statement_time` on MariaDB). Multi-statement mode is off.
- * mysql2 buffers a result set before returning it, so keep a `LIMIT` in large queries —
- * the row cap trims what is sent to the model, not what the server scans.
+ * `query` streams rows and stops reading after `maxRows + 1`, so a large result never has to
+ * fit in memory. The server may still scan (or sort) more rows than that before the first row
+ * arrives, so keep a `LIMIT` in large queries.
  */
 export class MysqlAdapter implements Adapter {
   readonly dialect = "mysql" as const;
@@ -46,21 +48,29 @@ export class MysqlAdapter implements Adapter {
     return `\`${name.replaceAll("`", "``")}\``;
   }
 
-  private async readOnly<T>(fn: (conn: Conn) => Promise<T>, timeoutMs?: number): Promise<T> {
+  /**
+   * Runs `fn` in a read-only transaction. `fn` calls `discard()` when it leaves the connection
+   * in a state that cannot be reused (for example, in the middle of a result set).
+   */
+  private async readOnly<T>(fn: (conn: Conn, discard: () => void) => Promise<T>, timeoutMs?: number): Promise<T> {
     const conn = await this.pool.getConnection();
     let broken = false;
+    let discarded = false;
     try {
       if (timeoutMs !== undefined) await applyTimeout(conn, timeoutMs);
       // DDL commits implicitly in MySQL and would escape a plain READ ONLY transaction, so the
       // session default is switched to read-only as well (execute() switches it back).
       await conn.query("SET SESSION TRANSACTION READ ONLY");
       await conn.query("START TRANSACTION READ ONLY");
-      return await fn(conn);
+      return await fn(conn, () => {
+        discarded = true;
+      });
     } catch (err) {
       broken = isConnectionError(err);
       throw err;
     } finally {
-      if (broken) conn.destroy();
+      if (discarded) closeNow(conn);
+      else if (broken) conn.destroy();
       else {
         await conn.query("ROLLBACK").catch(() => {});
         conn.release();
@@ -192,14 +202,31 @@ export class MysqlAdapter implements Adapter {
 
   async query(sql: string, params: Param[], limits: Limits): Promise<QueryResult> {
     const started = performance.now();
-    return this.readOnly(async (conn) => {
-      const [result, fields] = await conn.query({ sql, values: params, rowsAsArray: true });
-      const all = Array.isArray(result) ? (result as unknown[][]) : [];
-      const truncated = all.length > limits.maxRows;
-      const columns = Array.isArray(fields) ? (fields as Array<{ name: string }>).map((f) => f.name) : [];
+    return this.readOnly(async (conn, discard) => {
+      // Stream the rows and stop after maxRows + 1 instead of buffering the whole result set.
+      // The promise wrapper cannot stream, so this goes through the underlying callback connection.
+      const query = callbackConnection(conn).query({ sql, values: params, rowsAsArray: true });
+      let columns: string[] = [];
+      query.on("fields", (fields: unknown) => {
+        if (Array.isArray(fields)) columns = (fields as Array<{ name: string }>).map((f) => f.name);
+      });
+      const rows: unknown[][] = [];
+      let truncated = false;
+      for await (const row of query.stream()) {
+        // A statement without a result set yields an OK packet instead of rows.
+        if (!Array.isArray(row)) continue;
+        if (rows.length === limits.maxRows) {
+          truncated = true;
+          break;
+        }
+        rows.push(row);
+      }
+      // Leaving the loop early destroys the stream, but the server is still sending the rest of
+      // the result set on this connection, so it must not go back to the pool.
+      if (truncated) discard();
       return {
         columns,
-        rows: (truncated ? all.slice(0, limits.maxRows) : all).map(toJsonRow),
+        rows: rows.map(toJsonRow),
         truncated,
         durationMs: Math.round(performance.now() - started),
       };
@@ -248,6 +275,21 @@ async function applyTimeout(conn: Conn, timeoutMs: number): Promise<void> {
       /* server supports neither; the row cap still applies */
     }
   }
+}
+
+/** The promise typings declare `PoolConnection.connection` as a promise connection; it is the callback one. */
+function callbackConnection(conn: Conn): CallbackConnection {
+  return conn.connection as unknown as CallbackConnection;
+}
+
+/**
+ * Removes a connection from the pool and closes its socket at once. `destroy()` alone only
+ * half-closes the socket, and mysql2 would keep reading (and dropping) the rest of an unfinished
+ * result set. With the socket closed, the server's next write fails and it stops the query.
+ */
+function closeNow(conn: Conn): void {
+  conn.destroy();
+  (callbackConnection(conn) as unknown as { stream?: { destroy(): void } }).stream?.destroy();
 }
 
 function isConnectionError(err: unknown): boolean {

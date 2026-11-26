@@ -110,6 +110,43 @@ suite("mysql", () => {
     expect(data.truncated).toBe(true);
   });
 
+  it("does not mark a result with exactly maxRows rows as truncated", async () => {
+    const res = await adapter.query("SELECT id FROM users ORDER BY id", [], { maxRows: 300, timeoutMs: 5000 });
+    expect(res.rows).toHaveLength(300);
+    expect(res.truncated).toBe(false);
+  });
+
+  it("stops reading a large result at the row cap and stops the query on the server", async () => {
+    // 300^3 = 27 million rows: buffering them all would run into the timeout (or out of memory).
+    const sql = "SELECT u1.id, u2.id, u3.id FROM users u1, users u2, users u3";
+    const started = Date.now();
+    const res = await adapter.query(sql, [], { maxRows: 50, timeoutMs: 20_000 });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(res.columns).toEqual(["id", "id", "id"]);
+    expect(res.rows).toHaveLength(50);
+    expect(res.truncated).toBe(true);
+
+    // The connection was left mid-result: it must be closed, so the server stops sending rows.
+    const admin = await mysql.createConnection({ uri: url! });
+    try {
+      let running: unknown[] = [];
+      for (let i = 0; i < 40; i++) {
+        [running] = (await admin.query("SELECT ID FROM information_schema.PROCESSLIST WHERE INFO = ?", [sql])) as [unknown[], unknown];
+        if (running.length === 0) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(running).toEqual([]);
+    } finally {
+      await admin.end();
+    }
+
+    // The pool keeps working and later queries are still read-only.
+    for (let i = 0; i < 3; i++) {
+      expect((await adapter.query("SELECT count(*) FROM users", [], { maxRows: 10, timeoutMs: 5000 })).rows).toEqual([[300]]);
+    }
+    await expect(adapter.query("DELETE FROM users WHERE id = 1", [], { maxRows: 10, timeoutMs: 5000 })).rejects.toThrow(/read.only/i);
+  });
+
   it("samples rows", async () => {
     const h = await connect(adapter);
     expect((await h.call("sample_rows", { table: "users", limit: 5 })).data.rowCount).toBe(5);
