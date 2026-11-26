@@ -21,3 +21,44 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # Runs the MySQL suite and the real-PostgreSQL tests against actual servers.
+  # The default test job above uses PGlite and skips them.
+  databases:
+    name: databases (${{ matrix.mysql }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql: ["mysql:8.4", "mysql:9", "mariadb:11"]
+    services:
+      mysql:
+        image: ${{ matrix.mysql }}
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: scratch
+          MARIADB_ROOT_PASSWORD: test
+          MARIADB_DATABASE: scratch
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -ptest || healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: scratch
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TEST_MYSQL_URL: mysql://root:test@127.0.0.1:3306/scratch
+      TEST_PG_URL: postgres://postgres:test@127.0.0.1:5432/scratch
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run test/mysql.test.ts test/postgres-server.test.ts
