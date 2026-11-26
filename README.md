@@ -112,10 +112,11 @@ GRANT SELECT ON mydb.* TO 'mcp_readonly'@'%';
 - the SQL guard against comment/string/dollar-quote smuggling tricks, per dialect;
 - **SQLite** through `node:sqlite`, including a runaway recursive CTE that is stopped at the timeout and its process killed;
 - **PostgreSQL** against a real Postgres engine ([PGlite](https://pglite.dev) behind a TCP socket) through the real `pg` driver, including cursors;
-- **MySQL** against a real server (set `TEST_MYSQL_URL` to a scratch database; skipped otherwise). Developed against MySQL 9.3;
+- **MySQL and MariaDB** against real servers. CI runs the suite on MySQL 8.4, MySQL 9 and MariaDB 11; locally, set `TEST_MYSQL_URL` to a scratch database (skipped otherwise);
+- **PostgreSQL `statement_timeout` enforcement** against a real PostgreSQL 17 server in CI (`TEST_PG_URL` locally), including that the pool keeps working after a cancelled statement;
 - the **built CLI over stdio**, exactly as an MCP client launches it.
 
-Not covered by automated tests: PostgreSQL `statement_timeout` *enforcement* (PGlite is single-threaded and cannot interrupt a statement; the test verifies the limit is applied to the session) and MariaDB-specific code paths (`max_statement_time`, schemas without `STATISTICS.EXPRESSION`).
+MariaDB-specific code paths (`max_statement_time`, schemas without `STATISTICS.EXPRESSION`) now run in CI through the MariaDB 11 job.
 
 ## Development
 
@@ -125,8 +126,8 @@ npm test            # unit + integration + e2e
 npm run typecheck
 npm run build       # bundles to dist/index.js
 
-# optional: also run the MySQL suite against a scratch database
-TEST_MYSQL_URL=mysql://user:pass@127.0.0.1:3306/scratch npm test
+# optional: also run the server suites against scratch databases
+TEST_MYSQL_URL=mysql://user:pass@127.0.0.1:3306/scratch TEST_PG_URL=postgres://user:pass@127.0.0.1:5432/scratch npm test
 ```
 
 ## License
