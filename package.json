@@ -1,6 +1,6 @@
 {
   "name": "@aranshayan/mcp-database",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Safe, read-only-by-default MCP server for PostgreSQL, MySQL and SQLite: schema discovery, guarded queries, row limits and timeouts.",
   "mcpName": "io.github.aranshayan/mcp-database",
   "type": "module",
