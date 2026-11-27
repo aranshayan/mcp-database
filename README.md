@@ -13,6 +13,8 @@ Let Claude (or any MCP client) explore your schema and answer questions from you
 - **Zero native dependencies.** SQLite uses Node's built-in `node:sqlite`; Postgres and MySQL use pure-JS drivers. `npx` just works.
 - **One server, three engines.** The connection string decides the dialect.
 
+> **Only PostgreSQL, with personal data in it?** [pg-guard-mcp](https://github.com/aranshayan/pg-guard-mcp) is the stricter sibling: Postgres only, never writes, masks the columns you mark as personal data and keeps an append-only audit log.
+
 ## Quick start
 
 Use a database account that can only `SELECT` (see [Create a read-only role](#create-a-read-only-role)).
